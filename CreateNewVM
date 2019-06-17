@@ -1,0 +1,155 @@
+Param
+    (
+	    [parameter(Mandatory=$true)] [String] $Location,
+        [parameter(Mandatory=$true)] [String] $ResourceGroupName,
+        [parameter(Mandatory=$true)] [String] $StorageAccountName,
+        [parameter(Mandatory=$true)] [String] $VMName,
+        [parameter(Mandatory=$true)] [String] $vNet,
+        [parameter(Mandatory=$true)] [String] $Subnet,
+        [parameter(Mandatory=$true)] [String] $NetworkSecurityGroup
+        
+    )
+
+# Authenticate to Azure by using the service principal and certificate. Then, set the subscription.
+$conn = Get-AutomationConnection -Name 'AzureRunAsConnection'
+
+"Logging in to Azure.."
+Add-AzureRmAccount -ServicePrincipal -Tenant $conn.TenantID `
+-ApplicationID $conn.ApplicationID -CertificateThumbprint $conn.CertificateThumbprint
+
+$VMcred = Get-AutomationPSCredential -Name 'VMUserCred'
+$VMUsername = $VMcred.Username
+$VMPassword = $VMcred.GetNetworkCredential().Password
+
+#Check whether if the Resource group $vm.ResourceGroup already exists
+$RGStatus = Get-AzureRmResourceGroup -Name $ResourceGroupName -ErrorAction Ignore
+    if ($RGStatus -eq $null)  
+        {    
+            "Resource group $ResourceGroupName does not exist and will be created"
+            New-AzureRmResourceGroup -Name $ResourceGroupName -Location $Location 
+            $RGStatus = Get-AzureRmResourceGroup -Name $ResourceGroupName
+        }
+    else
+        {
+            "Resource group $ResourceGroupName already exists. $VMName will be deployed to $ResourceGroupName."
+        }
+
+#Check whether a VM by name $VMName already exists, if does not exists create VM
+Write-Output ("Checking whether VM $VMName already exists.." -f $VMName)
+$AzureVM = Get-AzureRmVM -ResourceGroupName $ResourceGroupName -Name $VMName -ErrorAction Ignore
+    If ($AzureVM -eq $null)
+        {
+            # Check whether a Storage Account by name StorageAccount already exists, if does not exists create VM
+            $StStatus = Get-AzureRmStorageAccount -Name $StorageAccountName -ResourceGroupName $ResourceGroupName -ErrorAction Ignore
+                If ($StStatus -eq $null)  
+                    { 
+                        "Storage account $StorageAccountName does not exist and will be created"
+                        New-AzureRmStorageAccount -Location $Location -Name $StorageAccountName -ResourceGroupName $ResourceGroupName -SkuName Standard_LRS -Kind Storage     
+                        $StStatus = Get-AzureRmStorageAccount -Name $StorageAccountName -ResourceGroupName $ResourceGroupName
+                    }
+                else
+                    {
+                        "Storage account $StorageAccountName already exists. $VMName will be deployed to $StorageAccountName."
+                    }
+
+            $NetworkStatus = Get-AzureRmVirtualNetwork -Name $vNet -ResourceGroupName $ResourceGroupName -ErrorAction Ignore
+                If ($NetworkStatus -eq $null)  
+                    { 
+                        "Virtual Network $vNet does not exist and will be created"
+
+                        $NSGStatus = Get-AzureRmNetworkSecurityGroup -Name $NetworkSecurityGroup -ResourceGroupName $ResourceGroupName -ErrorAction Ignore
+                        If ($NSGStatus -eq $null)  
+                            { 
+                                "Network Security Group $NetworkSecurityGroup does not exist and will be created"
+                                # Create an inbound network security group rule for port 3389
+                                $nsgRuleRDP = New-AzureRmNetworkSecurityRuleConfig -Name "NSGRule$(Get-Random)" -Protocol tcp `
+                                -Direction Inbound -Priority 1000 -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * `
+                                -DestinationPortRange 3389 -Access Allow
+
+                                # Create a network security group
+                                $NSGStatus = New-AzureRmNetworkSecurityGroup -ResourceGroupName $ResourceGroupName -Location $Location `
+                                -Name $NetworkSecurityGroup -SecurityRules $nsgRuleRDP -Force   
+                                $NSGStatus = Get-AzureRmNetworkSecurityGroup -Name $NetworkSecurityGroup -ResourceGroupName $ResourceGroupName
+                            }
+                        else
+                            {
+                                "Network Security Group $NetworkSecurityGroup already exists. $VMName will be using $NetworkSecurityGroup as Network Security Group ."          
+                            }
+                            
+                        
+                        # Create a subnet configuration
+                        $subnetConfig = New-AzureRmVirtualNetworkSubnetConfig -Name $Subnet -AddressPrefix 192.168.1.0/24 -NetworkSecurityGroup $NSGStatus
+                        $NetworkStatus = New-AzureRmVirtualNetwork -ResourceGroupName $ResourceGroupName -Location $Location `
+                        -Name $vNet -AddressPrefix 192.168.0.0/16 -Subnet $subnetConfig -Force     
+                        $NetworkStatus = Get-AzureRmVirtualNetwork -Name $vNet -ResourceGroupName $ResourceGroupName -ErrorAction Ignore
+                            
+                    }
+                else
+                    {
+                        "Virtual Network $vNet already exists. $VMName will be using $vNet."
+                        
+                        $NSGStatus = Get-AzureRmNetworkSecurityGroup -Name $NetworkSecurityGroup -ResourceGroupName $ResourceGroupName -ErrorAction Ignore
+                        If ($NSGStatus -eq $null)  
+                            { 
+                                "Network Security Group $NetworkSecurityGroup does not exist and will be created"
+                                # Create an inbound network security group rule for port 3389
+                                $nsgRuleRDP = New-AzureRmNetworkSecurityRuleConfig -Name "NSGRule$(Get-Random)" -Protocol tcp `
+                                -Direction Inbound -Priority 1000 -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * `
+                                -DestinationPortRange 3389 -Access Allow
+
+                                # Create a network security group
+                                $NSGStatus = New-AzureRmNetworkSecurityGroup -ResourceGroupName $ResourceGroupName -Location $Location `
+                                -Name $NetworkSecurityGroup -SecurityRules $nsgRuleRDP -Force   
+                                $NSGStatus = Get-AzureRmNetworkSecurityGroup -Name $NetworkSecurityGroup -ResourceGroupName $ResourceGroupName
+                            }
+                        else
+                            {
+                                "Network Security Group $NetworkSecurityGroup already exists. $VMName will be using $NetworkSecurityGroup as Network Security Group ."          
+                            }
+
+                        $subnetConfig = Get-AzureRmVirtualNetworkSubnetConfig -Name $Subnet -VirtualNetwork $NetworkStatus -ErrorAction Ignore
+                            If ($subnetConfig -eq $null)
+                                {  
+                                    # Add a subnet configuration
+                                    $subnetConfig = Add-AzureRmVirtualNetworkSubnetConfig -Name $Subnet -VirtualNetwork $NetworkStatus -AddressPrefix 192.168.2.0/24 -NetworkSecurityGroup $NSGStatus
+                                    $NetworkStatus | Set-AzureRmVirtualNetwork     
+                                    $NetworkStatus = Get-AzureRmVirtualNetwork -Name $vNet -ResourceGroupName $ResourceGroupName -ErrorAction Ignore
+                                }
+                            else
+                                {
+                                    "Subnet $Subnet already exists. $VMName will be using $Subnet in $vNet ." 
+                                }           
+                    }
+                            
+                # Create a public IP address and specify a DNS name
+                $publicIP = New-AzureRmPublicIpAddress -ResourceGroupName $ResourceGroupName -Location $Location `
+                -Name "mypublicdns$(Get-Random)" -AllocationMethod Static -IdleTimeoutInMinutes 4
+                $publicIP | Select-Object Name,IpAddress
+                    
+                # Create a virtual network card and associate with public IP address and NSG
+                $nic = New-AzureRmNetworkInterface -Name "Nic$(Get-Random)" -ResourceGroupName $ResourceGroupName -Location $Location `
+                -SubnetId $NetworkStatus.Subnets[0].Id -PublicIpAddressId $publicIp.Id -NetworkSecurityGroupId $NSGStatus.Id -Force
+
+                #Create a VM configuration
+                $vmConfig = New-AzureRmVMConfig -VMName $VMName -VMSize Standard_DS1_v2 |
+                Set-AzureRmVMOperatingSystem -Windows -ComputerName $VMName -Credential $VMcred |
+                Set-AzureRmVMSourceImage -PublisherName MicrosoftWindowsServer -Offer WindowsServer -Skus 2016-Datacenter -Version latest |
+                Add-AzureRmVMNetworkInterface -Id $nic.Id    
+
+                "----------------------------------------------------------------------------"
+                            "The VM will be deployed with the following specs"
+                            "Resource Group              : $ResourceGroupName"
+                            "VMName                      : $VMName"
+                            "Storage Group Name          : $StorageAccountName"
+                            "Virtual Network             : $VNet"
+                            "Subnet                      : $Subnet"
+                            "Network Security Group      : $NetworkSecurityGroup"
+                "----------------------------------------------------------------------------"
+
+                #Create a VM
+                ##New-AzureRmVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $vmConfig
+        }
+    else
+        {
+            Write-Output ("VM $VMName already exists. Not creating it again" -f $VMName)
+        }
